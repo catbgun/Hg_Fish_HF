@@ -1,0 +1,95 @@
+---
+title: "Hg Fish_HF"
+author: "CBG"
+date: "12 11 2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+### Packages
+The following packages are required
+- dplyr (for summarising data)
+
+```{r load required packages}
+Packages <- c("dplyr", "graphics", "ggplot2", "GGally", "bestgml")
+lapply(Packages, library, character.only = TRUE)
+```
+
+## Model Hg in Fish
+
+Look at potential change in fish Hg at three different lakes (Ellasjøen, Mjøsa_Femunden, and Tollreien_Breidtjern) over time (1990-2020) with following parameters as potential explanatory variables: 
+- fish descriptors: length, weight, age, stable C and N isotopes
+- annual average airtemperature and precipitation
+- annual average Hg-deposition and possibly Hg-concentration in air
+- changes of O2 in water (if TOC/colour data is present)
+
+### Loading the data, two files (fish THg and other variables) for the three locations
+
+```{r load data}
+THg_Ella <- read.table("THg_Ellasjøen.txt", sep = "\t", header = TRUE)
+Vari_Ella <- read.table("Vari_Ellasjøen.txt", sep = "\t", header = TRUE)
+class(Vari_Ella)
+```
+### Data preparation
+- convert some columns from character to numeric
+- annual average of THg in fish data
+- merge datasets
+- NAs?
+- missing data?
+
+```{r Data preparation}
+THg_Ella$Length <- as.numeric(THg_Ella$Length)
+head(THg_Ella)
+
+THg_EllaX = THg_Ella %>%
+  group_by(Year) %>%
+  select(Length:THg) %>% # select variables to summarise, from and to
+  summarise(across(everything(), .f = list(mean = mean), na.rm = TRUE))
+
+Ella_all <- merge(THg_EllaX, Vari_Ella, by="Year", all.x=TRUE)
+
+Ella_all <- Ella_all[,(-8)]
+```
+
+### Explore data
+- influential points?
+- colinearity: weight and length naturally covariates strongly. Should perhaps not be in the same model?
+
+```{r explore data}
+dotchart(Ella_all$THg_mean, main="Hg.old") 
+plot(Ella_all$Hg_dep, Ella_all$THg_mean)
+
+newvar <- subset(Ella_all, select=c(Length_mean, Weight_mean, Hg_dep, Temp, Prec))
+ggpairs(newvar) 
+```
+
+## Explore GLM model (what are the requirements for the data? distributions etc.)
+```{r Explore GLM model}
+new <- subset(Ella_all, select=c(Length_mean, Weight_mean, Hg_dep, Temp, Prec, THg_mean))
+
+
+res.best.logistic <-
+    bestglm(Xy = Ella_all,
+            family = Gaussian,          # binomial family for logit
+            IC = "AIC",                 # AIC chosen to select models
+            method = "exhaustive")
+
+Ella_all = na.omit(new)
+hopp <- bestglm(Ella_all,  method = "exhaustive")
+plot(hopp)
+
+```
+
+
+
+
+
+You can also embed plots, for example:
+
+```{r pressure, echo=FALSE}
+plot(pressure)
+```
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
