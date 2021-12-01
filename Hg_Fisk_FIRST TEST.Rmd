@@ -5,91 +5,228 @@ date: "12 11 2021"
 output: html_document
 ---
 
-```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE)
+```{r setup, include=FALSE, warning = FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message=FALSE)
 ```
 ### Packages
 The following packages are required
 - dplyr (for summarising data)
 
 ```{r load required packages}
-Packages <- c("dplyr", "graphics", "ggplot2", "GGally", "bestgml")
+Packages <- c("dplyr", "graphics", "ggplot2", "GGally", "bestglm", "magrittr")
 lapply(Packages, library, character.only = TRUE)
+```
+```{r VIF function for GAM}
+samvif <- function(mod){
+  # mod is an mgcv object
+  # this function calculates the variance inflation factors for GAM as no one else has written code to do it properly
+  
+  # this is used to summarise how well the GAM performed
+  
+  mod.sum <- summary(mod)
+  s2 <- mod$sig2 # estimate of standard deviation of residuals
+  X <- mod$model # data used to fit the model
+  n <- nrow(X) # how many observations were used in fitting?
+  v <- -1 # omit the intercept term, it can't inflate variance
+  varbeta <- mod.sum$p.table[v,2]^2 # variance in estimates
+  varXj <- apply(X=X[,row.names(mod.sum$p.table)[v]],MARGIN=2, var) # variance of all the explanatory variables
+  VIF <- varbeta/(s2/(n-1)*1/varXj) # the variance inflation factor, obtained by rearranging
+  # var(beta_j) = s^2/(n-1) * 1/var(X_j) * VIF_j
+  
+  VIF.df <- data.frame(variable=names(VIF),
+                       vif=VIF, 
+                       row.names=NULL)
+                       
+  return(VIF.df)
+}
 ```
 
 ## Model Hg in Fish
-
 Look at potential change in fish Hg at three different lakes (Ellasjøen, Mjøsa_Femunden, and Tollreien_Breidtjern) over time (1990-2020) with following parameters as potential explanatory variables: 
-- fish descriptors: length, weight, age, stable C and N isotopes
-- annual average airtemperature and precipitation
+- fish descriptors: length, weight, sex, age, stable C and N isotopes
+- annual average air temperature and precipitation
 - annual average Hg-deposition and possibly Hg-concentration in air
 - changes of O2 in water (if TOC/colour data is present)
 
 ### Loading the data, two files (fish THg and other variables) for the three locations
+- Sites cover: Ellasjøen, Mjøsa_Femunden, and Tollreien_Breidtjern
+- TOC data available for Breidtjern and Pt for Vorma (Mjøsa/Femunden)
 
-```{r load data}
-THg_Ella <- read.table("THg_Ellasjøen.txt", sep = "\t", header = TRUE)
-Vari_Ella <- read.table("Vari_Ellasjøen.txt", sep = "\t", header = TRUE)
-class(Vari_Ella)
+```{r Load data}
+THg <- read.table("THg_AllFishData.txt", sep = "\t", header = TRUE)
+Vari <- read.table("All_Variables.txt", sep = "\t", header = TRUE)
+TOC <- read.table("Breidtjern_TOC.txt", sep = "\t", header = TRUE)
+Pt <- read.table("Mjosa_Femunden_Pt_Vorma.txt", sep = "\t", header = TRUE)
 ```
 ### Data preparation
 - convert some columns from character to numeric
 - annual average of THg in fish data
-- merge datasets
+- merge fish data with other variables
+- THg in fish, Ellasjøenx1000 higher than other sites
+
 - NAs?
 - missing data?
 
 ```{r Data preparation}
-THg_Ella$Length <- as.numeric(THg_Ella$Length)
-head(THg_Ella)
+THg$Length <- as.numeric(THg$Length)
+Vari$Temp <- as.numeric(Vari$Temp)
 
-THg_EllaX = THg_Ella %>%
-  group_by(Year) %>%
-  select(Length:THg) %>% # select variables to summarise, from and to
+THg_X = THg %>%
+  group_by(Year, Lake) %>%
+  select(Length:d13C, Age) %>% # select variables to summarise, from and to
+  summarise(across(everything(), .f = list(mean = mean), na.rm = TRUE)) 
+
+Vari_X = Vari %>%
+  group_by(Year, Site) %>%
+  select(Hg_dep:Temp) %>% # select variables to summarise, from and to
   summarise(across(everything(), .f = list(mean = mean), na.rm = TRUE))
 
-Ella_all <- merge(THg_EllaX, Vari_Ella, by="Year", all.x=TRUE)
+TOC_X = TOC %>%
+  group_by(Year, Lake) %>%
+  select(Value) %>% # select variables to summarise, from and to
+  summarise(across(everything(), .f = list(mean = mean), na.rm = TRUE))
 
-Ella_all <- Ella_all[,(-8)]
+Pt_X = Pt %>%
+  group_by(Year) %>%
+  select(Concentration_TOC) %>% # select variables to summarise, from and to
+  summarise(across(everything(), .f = list(mean = mean), na.rm = TRUE))
+
+THg_X$Site = THg_X$Lake
+THg_all <- merge(THg_X, Vari_X, by=c("Year", "Site"), all.x=TRUE)
+THg_all <- THg_all[,(-3)]
+
+```
+### SUbset data based on location
+- for two stations, TOC/Pt data is attached
+- Pt Vorma til Mjøsa?
+```{r SUbset data based on site, add TOC/Pt data where applicable}
+Brei <- subset(THg_all, Site == 'Breidtjern')
+Brei$Lake = "Brei"
+BreiPt <- merge(Brei, Pt_X, by="Year")
+Ella <- subset(THg_all, Site == 'Ellasjoen')
+Ella$Lake = "Ella"
+Fem <- subset(THg_all, Site == 'Femunden')
+Fem$Lake = "Fem"
+Mjo <- subset(THg_all, Site == 'Mj?sa')
+Mjo$Lake = "Mjo"
+MjoTOC <- merge(Mjo, TOC_X, by="Year")
+MjoTOC$TOC = MjoTOC$Value_mean
+Toll <- subset(THg_all, Site == 'Tollreien')
+Toll$Lake = "Toll"
+
 ```
 
 ### Explore data
 - influential points?
+- amounts of zeroes?
 - colinearity: weight and length naturally covariates strongly. Should perhaps not be in the same model?
+- Interactions between covariates
+- linearity
+- temporal autocorrelation
 
 ```{r explore data}
-dotchart(Ella_all$THg_mean, main="Hg.old") 
-plot(Ella_all$Hg_dep, Ella_all$THg_mean)
 
-newvar <- subset(Ella_all, select=c(Length_mean, Weight_mean, Hg_dep, Temp, Prec))
-ggpairs(newvar) 
+ggplot(THg, aes(x=Year, y=THg, fill=Lake, group=Year))+
+  geom_boxplot()+
+  facet_grid(rows = vars(Lake), scales="free")
+
+library(ggplot2)
+library(GGally)
+BreiX <- subset(BreiPt, select=c(Length_mean, Weight_mean, THg_mean, Hg_dep_mean, Prec_mean, Concentration_TOC_mean))
+ggpairs(BreiX,title="Brei")
+EllaX <- subset(Ella, select=c(Length_mean, Weight_mean, THg_mean))
+ggpairs(EllaX,title="Ellasjøen")
+FemX <- subset(Fem, select=c(Length_mean, Weight_mean, THg_mean, d15N_mean, d13C_mean, Hg_dep_mean, Prec_mean, Temp_mean))
+ggpairs(FemX,title="Femunden")
+MjoX <- subset(MjoTOC, select=c(Length_mean, Weight_mean, THg_mean,d15N_mean, Prec_mean, Temp_mean, Hg_dep_mean, TOC))
+ggpairs(MjoX,title="Mjøsa")
+TollX <- subset(Toll, select=c(Length_mean, Weight_mean, THg_mean))
+ggpairs(TollX,title="Toll")
+```
+### Comment on colinearity
+- several of the parameters show colinearity (e.g. weight and length)
+- should not be inceluded in the same model
+- colinearity can further be expllored using e.g. ANOVA
+
+Starting detailed with Mjøsa since many observations and variables. 
+- exclude observations before 1990 since they are few, likely uncertain, but will have weight (?)
+- Colinearity between length and weight, and with d15N, and between Hg-dep and d15N (strong!)
+- exclude weight, and keep length
+
+##Case Study: Mjøsa
+- selected for having many observations and variable data avaiable
+- check for colinearity between the variables: weight and length, as well as d15N with multiple variables
+- test using VIF. Scores > 10, parameter should be excluded from model
+
+```{r case study: Mjøsa}
+Mjoo <- subset(MjoTOC, Year>1990)
+MjooX <- subset(Mjoo, select=c(Length_mean, Weight_mean, THg_mean,d15N_mean, Prec_mean, Temp_mean, Hg_dep_mean, TOC))
+ggpairs(MjooX,title="Mjøsa 2")
+
+first <- gam(THg_mean~ s(Year)+Length_mean+Hg_dep_mean+TOC, data=Mjoo, method="REML")
+samvif(first)
+
+#, family=Gamma(link="identity")
+
+nrow(Mjoo)
+sec <- gam(THg_mean~ s(Year.c)+s(Length_mean), data=Mjoo, method="REML")
+summary(first)
+plot(first)
+gam.check(first, rep=500)
+print(first)
+plot(first,pages=1,scheme=1,unconditional=TRUE) 
+```
+if everything is fine from the gam.check, the k-index would be 1 or greater. if too low we need to increase the ka value in the model. Residual not accounted for. 
+p-value if significantly different from the random test. should not be different (p  0.05)
+
+```{r Testing Mjøsa trying to visualise GAM model}
+ggplot(Mjoo, aes(y=THg_mean, x=Year))+
+  geom_point()
+
+head(first)
+library(voxel) #visualise GAM using ggplot
+library(mgcViz)
+b <- getViz(first) #convert GAM model to plot
+o <- plot( sm(b, 1) )
+o + l_fitLine(colour = "red") + l_rug(mapping = aes(x=x, y=y), alpha = 0.8) +
+    l_ciLine(mul = 5, colour = "blue", linetype = 2) + 
+    l_points(shape = 19, size = 1, alpha = 0.1) + theme_classic()
+summary(first)
+
+plot(first)
 ```
 
-## Explore GLM model (what are the requirements for the data? distributions etc.)
-```{r Explore GLM model}
-new <- subset(Ella_all, select=c(Length_mean, Weight_mean, Hg_dep, Temp, Prec, THg_mean))
+### Generalized additive model 
+- incorporates nonlinear forms of the predictors
+- using a smooth function of the predictor variables, which can take on a great many form
+- the linear predictor now incorporates smooth functions of at least some (possibly all) covariates
+- allows for nonlinear relationships between the covariates and the target variable y
+- use models better suited to the situation, rather than torturing the data to fit a simplified modelling scheme
+- GAMs are suspectible to extrapolation, as is every statistical method ever created
+- composed of a sum of smiith functions of covaiates instead of or in addition to the standard linear covariate effects
+- we are using a function s within the formula to denote the smooth terms
+- we also specify the type of smooth, though a default is available. I chose bs = cr, denoting cubic regression splines
+
+### General data adaptations, checking diagnostics
+- qq plot for residuals, remover "outliers"
+- transformation of the target variable, in case of heteroscedacity (not because of non-normality!) some might take the log
+- it usually a good idea to scale predictor variables so that the effect is more meaningful
+
+```{r Hermer fra isbjørnene - Tester med datasett Brei}
+library(MuMIn) # for conducting model selection and model averaging
+library (mgcv) # Generalized additive (mixed) models, same as in the tutorial, gam
+library(lme4) #linear mixed effects models, lmer
+
+#centering year to get reasonable intercept
+Brei$Year.c <- (Brei$Year - min(Brei$Year)+1)
 
 
-res.best.logistic <-
-    bestglm(Xy = Ella_all,
-            family = Gaussian,          # binomial family for logit
-            IC = "AIC",                 # AIC chosen to select models
-            method = "exhaustive")
-
-Ella_all = na.omit(new)
-hopp <- bestglm(Ella_all,  method = "exhaustive")
-plot(hopp)
+```
+```{r Testing GAM modelling}
+mod_gam1 <- gam(THg_mean ~  s(Hg_dep_mean),data=MjoX)
+summary(mod_gam1)
 
 ```
 
 
 
-
-
-You can also embed plots, for example:
-
-```{r pressure, echo=FALSE}
-plot(pressure)
-```
-
-Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
