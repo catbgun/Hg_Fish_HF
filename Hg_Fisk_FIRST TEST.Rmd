@@ -4,25 +4,22 @@ author: "CBG"
 date: "12 11 2021"
 output: html_document
 ---
-
 ```{r setup, include=FALSE, warning = FALSE}
 knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message=FALSE)
 ```
 ### Packages
 The following packages are required
 - dplyr (for summarising data)
-
-```{r load required packages}
-Packages <- c("dplyr", "graphics", "ggplot2", "GGally", "bestglm", "magrittr")
+```{r load required packages, include=FALSE}
+Packages <- c("plyr", "dplyr", "graphics", "ggplot2", "GGally", "bestglm", "magrittr", "mgcv", "tidymv", "MuMIn", "tidyr")
 lapply(Packages, library, character.only = TRUE)
 ```
+
 ```{r VIF function for GAM}
 samvif <- function(mod){
   # mod is an mgcv object
   # this function calculates the variance inflation factors for GAM as no one else has written code to do it properly
-  
   # this is used to summarise how well the GAM performed
-  
   mod.sum <- summary(mod)
   s2 <- mod$sig2 # estimate of standard deviation of residuals
   X <- mod$model # data used to fit the model
@@ -36,22 +33,71 @@ samvif <- function(mod){
   VIF.df <- data.frame(variable=names(VIF),
                        vif=VIF, 
                        row.names=NULL)
-                       
   return(VIF.df)
 }
 ```
 
-## Model Hg in Fish
-Look at potential change in fish Hg at three different lakes (Ellasjøen, Mjøsa_Femunden, and Tollreien_Breidtjern) over time (1990-2020) with following parameters as potential explanatory variables: 
+```{r Function for testing linearity of distributions}
+#Function MyMultipanel.ggp2: Mixed effects models and extensions in ecology with R. (2009).
+#Zuur, AF, Ieno, EN, Walker, N, Saveliev, AA, and Smith, GM. Springer.
+MyMultipanel.ggp2 <- function(Z, varx, vary, 
+                              ylab = "Response variable",
+                              addSmoother = FALSE,
+                              addRegressionLine = FALSE,
+                              addHorizontalLine = FALSE) {
+  K <- length(varx)
+  MyData <- data.frame(Y = rep(as.vector(as.matrix(Z[,vary])), K),
+                       X = as.vector(as.matrix(Z[, varx])),
+                       Var = rep(varx, each = nrow(Z))) 
+  library(ggplot2)
+  p <- ggplot(MyData, aes(y = Y, x = X))
+  p <- p + geom_point() + ylab(ylab) + xlab("Covariates")
+  p <- p + theme(text = element_text(size=15))
+  if (addSmoother == TRUE) {
+    p <- p + geom_smooth(se = TRUE, col = "black", lwd = 1)
+  }
+  if (addRegressionLine == TRUE) {
+    p <- p + geom_smooth(se = TRUE, col = "black", lwd = 1, method = "lm")
+  }
+  if (addRegressionLine == TRUE) {
+    p <- p + geom_smooth(se = TRUE, col = "black", lwd = 1, method = "lm")
+  }
+  if (addHorizontalLine == TRUE) {
+    p <- p + geom_hline(yintercept = 0)
+  }
+  p <- p + facet_wrap(~ Var, scales = "free_x")
+  suppressMessages(print(p)) 	
+}
+
+#To make plots individually to individual optimization
+#Function for å definere antall siffer i akse
+fmt_dcimals <- function(decimals=1){
+  function(x) format(x,nsmall = decimals,scientific = FALSE)
+}
+```
+## Model Hg in Fish (Aim)
+Look at potential change in fish Hg at three different (Mjøsa, Ellasjøen, Femunden,Tollreien, and Breidtjern) over time (1990-2020) with the following parameters as potential explanatory variables: 
 - fish descriptors: length, weight, sex, age, stable C and N isotopes
 - annual average air temperature and precipitation
 - annual average Hg-deposition and possibly Hg-concentration in air
-- changes of O2 in water (if TOC/colour data is present)
-
-### Loading the data, two files (fish THg and other variables) for the three locations
-- Sites cover: Ellasjøen, Mjøsa_Femunden, and Tollreien_Breidtjern
 - TOC data available for Breidtjern and Pt for Vorma (Mjøsa/Femunden)
 
+## Procedure
+1) look at the THg data, should all years be included (influential points)?
+2) look at the variables: 
+  - influential points? 
+  - Collinearity? if so, those parameters should not be included together in the model. 
+  - Linear distributions? - if looking no, check distribution of residuals, if no -> use GAM (to avoid data transformation)
+  - Temporal autocorrelation?
+
+### Generalized additive model (GAM)
+- use models better suited to the situation, rather than torturing the data to fit a simplified modelling scheme
+- incorporates nonlinear forms of the predictors
+- using a smooth function of the predictor variables, which can take on a great many form
+- allows for nonlinear relationships between the covariates and the target variable y
+- GAMs are suspectible to extrapolation, as is every statistical method ever created
+- being additive and not normally including interactions between covariates
+The sorts of smooths we fit in mgcv are (typically) penalized smooths; we choose to use some number of basis functions k, which sets an upper limit on the complexity — wiggliness — of the smooth, and then we estimate parameters for the model by maximizing a penalized log-likelihood. The log-likelihood of the model is a measure of the fit (or lack there of), while the penalty helps us avoid fitting overly complex smooths.
 ```{r Load data}
 THg <- read.table("THg_AllFishData.txt", sep = "\t", header = TRUE)
 Vari <- read.table("All_Variables.txt", sep = "\t", header = TRUE)
@@ -63,10 +109,7 @@ Pt <- read.table("Mjosa_Femunden_Pt_Vorma.txt", sep = "\t", header = TRUE)
 - annual average of THg in fish data
 - merge fish data with other variables
 - THg in fish, Ellasjøenx1000 higher than other sites
-
-- NAs?
-- missing data?
-
+- make new Hg_dep column with lag of 1 year
 ```{r Data preparation}
 THg$Length <- as.numeric(THg$Length)
 Vari$Temp <- as.numeric(Vari$Temp)
@@ -74,159 +117,401 @@ Vari$Temp <- as.numeric(Vari$Temp)
 THg_X = THg %>%
   group_by(Year, Lake) %>%
   select(Length:d13C, Age) %>% # select variables to summarise, from and to
-  summarise(across(everything(), .f = list(mean = mean), na.rm = TRUE)) 
+  dplyr::summarise(across(everything(), .f = list(mean = mean), na.rm = TRUE)) 
 
 Vari_X = Vari %>%
   group_by(Year, Site) %>%
   select(Hg_dep:Temp) %>% # select variables to summarise, from and to
-  summarise(across(everything(), .f = list(mean = mean), na.rm = TRUE))
+  dplyr::summarise(across(everything(), .f = list(mean = mean), na.rm = TRUE))
 
 TOC_X = TOC %>%
   group_by(Year, Lake) %>%
   select(Value) %>% # select variables to summarise, from and to
-  summarise(across(everything(), .f = list(mean = mean), na.rm = TRUE))
+  dplyr::summarise(across(everything(), .f = list(mean = mean), na.rm = TRUE))
 
 Pt_X = Pt %>%
   group_by(Year) %>%
   select(Concentration_TOC) %>% # select variables to summarise, from and to
-  summarise(across(everything(), .f = list(mean = mean), na.rm = TRUE))
+  dplyr::summarise(across(everything(), .f = list(mean = mean), na.rm = TRUE))
 
 THg_X$Site = THg_X$Lake
+Vari_X$Site <- revalue(Vari_X$Site, c("Mj?sa" = "Mjøsa", "Ellasj?en"="Ellasjøen"))
+THg_X$Site <- revalue(THg_X$Site, c("Mj?sa" = "Mjøsa", "Ellasjoen"="Ellasjøen"))
 THg_all <- merge(THg_X, Vari_X, by=c("Year", "Site"), all.x=TRUE)
 THg_all <- THg_all[,(-3)]
 
+THg_all$Hg_dep_mean2[2:nrow(THg_all)] <- THg_all$Hg_dep_mean[1:(nrow(THg_all) - 1)]
 ```
-### SUbset data based on location
-- for two stations, TOC/Pt data is attached
-- Pt Vorma til Mjøsa?
-```{r SUbset data based on site, add TOC/Pt data where applicable}
+
+```{r Subset data based on site, add TOC/Pt data where applicable}
 Brei <- subset(THg_all, Site == 'Breidtjern')
 Brei$Lake = "Brei"
 BreiPt <- merge(Brei, Pt_X, by="Year")
-Ella <- subset(THg_all, Site == 'Ellasjoen')
+Ella <- subset(THg_all, Site == 'Ellasjøen')
 Ella$Lake = "Ella"
 Fem <- subset(THg_all, Site == 'Femunden')
 Fem$Lake = "Fem"
-Mjo <- subset(THg_all, Site == 'Mj?sa')
+Mjo <- subset(THg_all, Site == 'Mjøsa')
 Mjo$Lake = "Mjo"
-MjoTOC <- merge(Mjo, TOC_X, by="Year")
+MjoTOC <- merge(Mjo, TOC_X, by="Year", all.x=TRUE)
 MjoTOC$TOC = MjoTOC$Value_mean
 Toll <- subset(THg_all, Site == 'Tollreien')
 Toll$Lake = "Toll"
-
 ```
-
 ### Explore data
-- influential points?
-- amounts of zeroes?
-- colinearity: weight and length naturally covariates strongly. Should perhaps not be in the same model?
-- Interactions between covariates
-- linearity
-- temporal autocorrelation
+- boxplot of data per year per site (look for extreme observations)
+  -Mjøsa early observations (<1990) should be excluded
+- correlation plot of variables from each site (look for collinearity)
+- For several of the sites there is colinearity between several of the variables, e.g. weight and length. Correlating variables should not be included in the same model. 
 
-```{r explore data}
+```{r Make boxplot per lake, without and with observations}
+THg2<-THg[!(THg$Lake=="Randsfjorden"),]
+THg2$Lake <- revalue(THg2$Lake, c("Mj?sa" = "Mjøsa", "Ellasjoen"="Ellasjøen"))
 
-ggplot(THg, aes(x=Year, y=THg, fill=Lake, group=Year))+
+ggplot(THg2, aes(x=Year, y=THg, fill=Lake, group=Year))+
   geom_boxplot()+
-  facet_grid(rows = vars(Lake), scales="free")
+  facet_grid(rows = vars(Lake), scales="free")+
+  scale_y_continuous(labels = fmt_dcimals(1))+
+  labs(title = "", y ="THg (mg/kg)")
 
-library(ggplot2)
-library(GGally)
-BreiX <- subset(BreiPt, select=c(Length_mean, Weight_mean, THg_mean, Hg_dep_mean, Prec_mean, Concentration_TOC_mean))
-ggpairs(BreiX,title="Brei")
-EllaX <- subset(Ella, select=c(Length_mean, Weight_mean, THg_mean))
-ggpairs(EllaX,title="Ellasjøen")
-FemX <- subset(Fem, select=c(Length_mean, Weight_mean, THg_mean, d15N_mean, d13C_mean, Hg_dep_mean, Prec_mean, Temp_mean))
-ggpairs(FemX,title="Femunden")
-MjoX <- subset(MjoTOC, select=c(Length_mean, Weight_mean, THg_mean,d15N_mean, Prec_mean, Temp_mean, Hg_dep_mean, TOC))
-ggpairs(MjoX,title="Mjøsa")
-TollX <- subset(Toll, select=c(Length_mean, Weight_mean, THg_mean))
-ggpairs(TollX,title="Toll")
+# https://www.r-graph-gallery.com/89-box-and-scatter-plot-with-ggplot2.html
+ggplot(THg2, aes(x=Lake, y=log10(THg), fill=Lake)) +
+    geom_boxplot() +
+    geom_jitter(color="black", size=0.4, alpha=0.9)+
+    scale_y_continuous(limits = c(-1.7, 0.7), labels = fmt_dcimals(1))+
+    labs(title = "", y ="log(THg (mg/kg))")+
+  geom_abline(aes(colour="black"),intercept=log10(0.02), slope=0)+
+  geom_abline(aes(colour="blue", linetype=d),intercept=log10(0.5), slope=0)
+  #scale_colour_manual(name='My Lines', values=c("blue"))
 ```
-### Comment on colinearity
-- several of the parameters show colinearity (e.g. weight and length)
-- should not be inceluded in the same model
-- colinearity can further be expllored using e.g. ANOVA
-
-Starting detailed with Mjøsa since many observations and variables. 
-- exclude observations before 1990 since they are few, likely uncertain, but will have weight (?)
-- Colinearity between length and weight, and with d15N, and between Hg-dep and d15N (strong!)
-- exclude weight, and keep length
-
-##Case Study: Mjøsa
-- selected for having many observations and variable data avaiable
-- check for colinearity between the variables: weight and length, as well as d15N with multiple variables
-- test using VIF. Scores > 10, parameter should be excluded from model
-
-```{r case study: Mjøsa}
-Mjoo <- subset(MjoTOC, Year>1990)
-MjooX <- subset(Mjoo, select=c(Length_mean, Weight_mean, THg_mean,d15N_mean, Prec_mean, Temp_mean, Hg_dep_mean, TOC))
-ggpairs(MjooX,title="Mjøsa 2")
-
-first <- gam(THg_mean~ s(Year)+Length_mean+Hg_dep_mean+TOC, data=Mjoo, method="REML")
-samvif(first)
-
-#, family=Gamma(link="identity")
-
-nrow(Mjoo)
-sec <- gam(THg_mean~ s(Year.c)+s(Length_mean), data=Mjoo, method="REML")
-summary(first)
-plot(first)
-gam.check(first, rep=500)
-print(first)
-plot(first,pages=1,scheme=1,unconditional=TRUE) 
+```{r explore data: Correlation analysis - plotting data per site}
+BreiX <- subset(BreiPt, select=c(Length_mean, Weight_mean, Hg_dep_mean, Hg_dep_mean2, Prec_mean, Concentration_TOC_mean))
+#ggpairs(BreiX,title="Breidtjern")
+EllaX <- subset(Ella, select=c(Length_mean, Weight_mean, Hg_dep_mean, Hg_dep_mean2, Prec_mean, Temp_mean))
+#ggpairs(EllaX,title="Ellasjøen")
+FemX <- subset(Fem, select=c(Length_mean, Weight_mean, d15N_mean, d13C_mean, Hg_dep_mean, Hg_dep_mean2, Prec_mean, Temp_mean))
+#ggpairs(FemX,title="Femunden")
+MjoX <- subset(MjoTOC, select=c(Length_mean, Weight_mean, d15N_mean, Prec_mean, Temp_mean, Hg_dep_mean, Hg_dep_mean2, TOC))
+#ggpairs(MjoX,title="Mjøsa")
+TollX <- subset(Toll, select=c(Length_mean, Weight_mean, Hg_dep_mean, Hg_dep_mean2, Prec_mean, Temp_mean))
+#ggpairs(TollX,title="Tollreien")
 ```
-if everything is fine from the gam.check, the k-index would be 1 or greater. if too low we need to increase the ka value in the model. Residual not accounted for. 
-p-value if significantly different from the random test. should not be different (p  0.05)
-
-```{r Testing Mjøsa trying to visualise GAM model}
-ggplot(Mjoo, aes(y=THg_mean, x=Year))+
-  geom_point()
-
-head(first)
-library(voxel) #visualise GAM using ggplot
-library(mgcViz)
-b <- getViz(first) #convert GAM model to plot
-o <- plot( sm(b, 1) )
-o + l_fitLine(colour = "red") + l_rug(mapping = aes(x=x, y=y), alpha = 0.8) +
-    l_ciLine(mul = 5, colour = "blue", linetype = 2) + 
-    l_points(shape = 19, size = 1, alpha = 0.1) + theme_classic()
-summary(first)
-
-plot(first)
-```
-
-### Generalized additive model 
-- incorporates nonlinear forms of the predictors
-- using a smooth function of the predictor variables, which can take on a great many form
-- the linear predictor now incorporates smooth functions of at least some (possibly all) covariates
-- allows for nonlinear relationships between the covariates and the target variable y
-- use models better suited to the situation, rather than torturing the data to fit a simplified modelling scheme
-- GAMs are suspectible to extrapolation, as is every statistical method ever created
-- composed of a sum of smiith functions of covaiates instead of or in addition to the standard linear covariate effects
-- we are using a function s within the formula to denote the smooth terms
-- we also specify the type of smooth, though a default is available. I chose bs = cr, denoting cubic regression splines
-
 ### General data adaptations, checking diagnostics
+http://www.sthda.com/english/articles/39-regression-model-diagnostics/161-linear-regression-assumptions-and-diagnostics-in-r-essentials/
 - qq plot for residuals, remover "outliers"
 - transformation of the target variable, in case of heteroscedacity (not because of non-normality!) some might take the log
 - it usually a good idea to scale predictor variables so that the effect is more meaningful
 
-```{r Hermer fra isbjørnene - Tester med datasett Brei}
-library(MuMIn) # for conducting model selection and model averaging
-library (mgcv) # Generalized additive (mixed) models, same as in the tutorial, gam
-library(lme4) #linear mixed effects models, lmer
+## Case Study: Mjøsa
+**Extreme observations:** exclude observations before 1990 since they are few, likely uncertain, but will have weight (?)
+**Collinearity:** between length and weight, and with d15N, and between Hg-dep and d15N (strong!)
+            Confirmed using VIF-test of the model. Scores > 10, parameter should be excluded from model
+Linear distribution: 
+Temporal autocorrelation: results show p only slightly higher than 0.05
+
+General for model selection:
+- method "REML"
+- basis: tp or cr (?)
+- start by including all terms smooth. The k value could be set as low as 3. Remember that a smooth adds 10 parameters which could cause problem for datasets with limited observations (degres of freedom...)
+- look at the results and if effective degrees of freedom =1, you know that term can be un-smooth
+- If response not normally distributed. To avoid transformation use gamma distribution
+- gam.check: if p-value is low and edf close to k' <- number of basis function is ok
+- k never higher than number of datapoints
+- maximum number of basis functions limits the maximum amount of non-linearity
+```{r Mjøsa - Looking at data an possible collinearity}
+ggpairs(MjoX,title="Mjøsa")
+MjoX1 <- subset(MjoTOC, select=c(Year, Length_mean, Weight_mean, THg_mean,d15N_mean, Prec_mean, Temp_mean, Hg_dep_mean,Hg_dep_mean2, TOC))
+MjoX_long <- gather(MjoX1, Variable, measurement, Length_mean:TOC, factor_key=TRUE)
+
+#plotting the variables separately
+ggplot(MjoX_long, aes(y = measurement, x = Year))+ 
+  geom_point(size = 3)+
+  facet_wrap(Variable~., scales="free")+
+  labs(title ="Mjøsa Variable data",x = "Year", y= "")
+
+Mjoo <- subset(MjoTOC, Year>1990)
+MyVar  <- c("Year", "Length_mean", "Weight_mean","d15N_mean", "Prec_mean", "Temp_mean", "Hg_dep_mean", "Hg_dep_mean2","TOC")
+MyMultipanel.ggp2(Mjoo, 
+                  varx = MyVar, 
+                  vary = "THg_mean",
+                  ylab = "Mercury",
+                  addSmoother = TRUE,
+                  addRegressionLine = FALSE,
+                  addHorizontalLine = FALSE)
+
+#For non-normal distributions, test residuals
+#Non-linearity suggested for Year and d15N -> check with residuals
+#Test1 <- uGamm(THg_mean~s(Year), random=list(Length_mean=~1), data=Mjoo)
+#plot(Test1$gam,residuals=TRUE,all.terms=F, pages=1, pch=21, main = "Hg vs year")
+#  abline(h=0.0, col="red") #non-linear
+#gam.check(Test1$gam) #not normally distributed
+
+#Test2 <- uGamm(THg_mean~s(Length_mean), random=list(Length_mean=~1),data=Mjoo)
+#plot(Test2$gam,residuals=TRUE,all.terms=F, pages=1, pch=21, main = "Hg vs Weight")
+#abline(h=0, col="red")
+#gam.check(Test2$gam)
+#Test3 <- uGamm(THg_mean~s(d15N_mean), random=list(Length_mean=~1),data=Mjoo)
+#plot(Test3$gam,residuals=TRUE,all.terms=F, pages=1, pch=21, main = "Hg vs d15")
+#abline(h=0, col="red")
+
+#Test4 <- uGamm(THg_mean~s(Hg_dep_mean), random=list(Length_mean=~1),data=Mjoo)
+#plot(Test4$gam,residuals=TRUE,all.terms=F, pages=1, pch=21, main = "Hg vs Hg dep")
+#abline(h=0, col="red") #linear
+```
+
+
+```{r case study: Mjøsa}
+#HGData$YEAR.c <- (HGData$YEAR - min(HGData$YEAR)+1) #centering year to get reasonable intercept
+MjoX1 <- subset(MjoTOC, select=c(Year, Length_mean, Weight_mean, THg_mean,d15N_mean, Prec_mean, Temp_mean, Hg_dep_mean,Hg_dep_mean2, TOC))
+MjoX_long <- gather(MjoX1, Variable, measurement, Length_mean:TOC, factor_key=TRUE)
+#plotting the variables separately
+ggplot(MjoX_long, aes(y = measurement, x = Year))+ 
+  geom_point(size = 3)+
+  facet_wrap(Variable~., scales="free")+
+  labs(title ="Mjøsa Variable data",x = "Year", y= "")
+
+Mjoo <- subset(MjoTOC, Year>1990)
+#for ggpairs, need to select without Year
+#ggpairs(MjooX,title="Mjøsa > 1990")
+
+# E) Temporal Autocorrelation
+#H0: model does not show lack of fit = "model is fine". p<0.05 rejects the H0. 
+MjooX <- subset(Mjoo, select=c(Length_mean, Weight_mean, d15N_mean, Prec_mean, Temp_mean, Hg_dep_mean, Hg_dep_mean2,TOC))
+acf(MjoX1$THg_mean) 
+Box.test(MjoX1$THg_mean, lag = 1, type = c("Box-Pierce", "Ljung-Box"), fitdf = 0)
 
 #centering year to get reasonable intercept
-Brei$Year.c <- (Brei$Year - min(Brei$Year)+1)
+Mjoo$Year.c <- (Mjoo$Year - min(Mjoo$Year)+1)
+
+#Scaling covariates for comparability
+Mjoo$Weight_mean.sc <- scale(Mjoo$Weight_mean)
+Mjoo$Hg_dep_mean.sc <- scale(Mjoo$Hg_dep_mean)
+Mjoo$Hg_dep_mean2.sc <- scale(Mjoo$Hg_dep_mean2)
+Mjoo$TOC.sc <- scale(Mjoo$TOC)
+Mjoo$Temp_mean.sc <- scale(Mjoo$Temp_mean)
+Mjoo$d15N_mean.sc <- scale(Mjoo$d15N_mean)
+Mjoo$Prec_mean.sc <- scale(Mjoo$Prec_mean)
+
+#Checking memory alocated to R
+memory.size() ### Checking your memory size
+memory.limit()
+memory.limit(size=56000) 
+
+# GAM model selection
+
+#GLM use link function to model non-normal data
+# Gamma versus Gaussian. Gamma lener seg mot den ene siden. 
+# Om gamma og identity link: https://stats.stackexchange.com/questions/471374/generalized-linear-model-and-identity-link-whats-its-benefit
+Hg.gam<-list()
+Hg.gam[[1]] <- gam(THg_mean~ s(Year.c, k=3)+s(Weight_mean.sc, k=3)+s(Hg_dep_mean.sc, k=3)+s(Prec_mean.sc, k=3)+s(TOC.sc, k=3)+s(Temp_mean.sc, k=3)+s(d15N_mean.sc, k=3), 
+             select=TRUE, data=Mjoo, method="REML", family=Gamma(link="identity"))
+Hg.gam[[2]] <- gam(THg_mean~ s(Year.c, k=4)+Weight_mean.sc+Hg_dep_mean.sc+s(Prec_mean.sc, k=4)+s(TOC.sc, k=4)+Temp_mean.sc+d15N_mean.sc, 
+             select=TRUE, data=Mjoo, method="REML", family=Gamma(link="identity"))
+Hg.gam[[3]] <- gam(THg_mean~ s(Year.c)+Weight_mean.sc+Hg_dep_mean.sc+Prec_mean.sc+TOC.sc+Temp_mean.sc+d15N_mean.sc, 
+             select=TRUE, data=Mjoo, method="REML", family=Gamma(link="identity"))
+Hg.gam[[4]] <- gam(THg_mean~ s(Year.c)+Weight_mean.sc+Hg_dep_mean2.sc+Prec_mean.sc+TOC.sc+Temp_mean.sc+d15N_mean.sc, 
+             select=TRUE, data=Mjoo, method="REML", family=Gamma(link="identity"))
+Hg.gam[[5]] <- gam(THg_mean~ s(Year.c)+Weight_mean.sc+Prec_mean.sc+TOC.sc+Temp_mean.sc+d15N_mean.sc, 
+             select=TRUE, data=Mjoo, method="REML", family=Gamma(link="identity"))
+Hg.gam[[6]] <- gam(THg_mean~ s(Year.c)+Weight_mean.sc+Hg_dep_mean2.sc+Prec_mean.sc+Temp_mean.sc+d15N_mean.sc, 
+             select=TRUE, data=Mjoo, method="REML", family=Gamma(link="identity"))
+Hg.gam[[7]] <- gam(THg_mean~ s(Year.c, k=8)+Weight_mean.sc+Hg_dep_mean2.sc+Prec_mean.sc+d15N_mean.sc, 
+             select=TRUE, data=Mjoo, method="REML", family=Gamma(link="identity"))
+Hg.gam[[8]] <- gam(THg_mean~ s(Year.c)+Weight_mean.sc+Hg_dep_mean2.sc+Prec_mean.sc, 
+             select=TRUE, data=Mjoo, method="REML", family=Gamma(link="identity"))
+
+plot(Hg.gam[[1]], rug = F, shade = T, main = "Visualise the need for s()", ylab = "")
+
+final <- gam(THg_mean~ s(Year.c, k=8)+Weight_mean.sc+Hg_dep_mean2.sc+Prec_mean.sc+d15N_mean.sc, 
+             select=TRUE, data=Mjoo, method="REML", family=Gamma(link="identity"))
+
+finalX <- gam(THg_mean~ s(Year, k=8)+Weight_mean+Hg_dep_mean2+Prec_mean+d15N_mean, 
+             select=TRUE, data=Mjoo, method="REML", family=Gamma(link="identity"))
+finalY <- gam(THg_mean~ s(Year, k=8)+Weight_mean+Prec_mean+d15N_mean, 
+             select=TRUE, data=Mjoo, method="REML", family=Gamma(link="identity"))
+
+#+d15N_mean
+model_pred = predict.gam(final,type="response",se.fit=T)
+  df <- data.frame(matrix(unlist(model_pred)),stringsAsFactors=FALSE)
+df$Type = c("pred", "pred", "pred", "pred", "pred", "pred", "pred", "pred", "pred", "pred", "pred", "pred", "pred", "pred", "pred", "pred", "SE", "SE", "SE", "SE", "SE","SE", "SE", "SE", "SE", "SE", "SE", "SE", "SE", "SE", "SE", "SE") 
+df$Year = c(2000, 2001, 2006, 2007, 2008, 2009, 2010, 2011, 2012, 2013, 2014, 2015, 2016, 2017, 2018, 2019, 2000, 2001, 2006, 2007, 2008, 2009, 2010, 2011, 2012, 2013, 2014, 2015, 2016, 2017, 2018, 2019) 
+colnames(df) <- c("Value", "Type", "Year")
+df2 <- spread(df, Type, Value)
+head(df2)
+
+df2$predgam = predict(finalX)
+
+ggplot(Mjoo, aes(x=Year, y=THg_mean))+
+  geom_point()+
+  geom_line(data=df2, aes(x=Year, y=pred))
+  geom_ribbon(data=df2, aes(ymin=pred-SE, ymax=pred+SE), alpha=0.1)
+
+visreg(finalX, "Year.c")
+  
+library(tidyverse)
+
+Hg.ga<-list()
+Hg.ga[[1]] <- gam(THg_mean~ s(Year, k=3)+s(Weight_mean, k=3)+s(Hg_dep_mean, k=3)+s(Prec_mean, k=3)+s(TOC.sc, k=3)+s(Temp_mean, k=3)+s(d15N_mean, k=3), 
+             select=TRUE, data=Mjoo, method="REML", family=Gamma(link="identity"))
+Hg.ga[[2]] <- gam(THg_mean~ s(Year, k=4)+Weight_mean+Hg_dep_mean+s(Prec_mean, k=4)+s(TOC, k=4)+Temp_mean+d15N_mean, 
+             select=TRUE, data=Mjoo, method="REML", family=Gamma(link="identity"))
+Hg.ga[[3]] <- gam(THg_mean~ s(Year)+Weight_mean+Hg_dep_mean+Prec_mean+TOC+Temp_mean+d15N_mean, 
+             select=TRUE, data=Mjoo, method="REML", family=Gamma(link="identity"))
+Hg.ga[[4]] <- gam(THg_mean~ s(Year)+Weight_mean+Hg_dep_mean2+Prec_mean+TOC+Temp_mean+d15N_mean, 
+             select=TRUE, data=Mjoo, method="REML", family=Gamma(link="identity"))
+Hg.ga[[5]] <- gam(THg_mean~ s(Year)+Weight_mean+Prec_mean+TOC+Temp_mean+d15N_mean, 
+             select=TRUE, data=Mjoo, method="REML", family=Gamma(link="identity"))
+Hg.ga[[6]] <- gam(THg_mean~ s(Year)+Weight_mean+Hg_dep_mean2+Prec_mean+Temp_mean+d15N_mean, 
+             select=TRUE, data=Mjoo, method="REML", family=Gamma(link="identity"))
+Hg.ga[[7]] <- gam(THg_mean~ s(Year, k=8)+Weight_mean+Hg_dep_mean2+Prec_mean+d15N_mean, 
+             select=TRUE, data=Mjoo, method="REML", family=Gamma(link="identity"))
+Hg.ga[[8]] <- gam(THg_mean~ s(Year)+Weight_mean+Hg_dep_mean2+Prec_mean, 
+             select=TRUE, data=Mjoo, method="REML", family=Gamma(link="identity"))
 
 
+model.sel(Hg.ga,rank = AIC ) 
+gam.check(finalX, rep=1000)
+summary(finalX)
+samvif(Hg.gam[[7]])
+
+  #predict_gam(finalX, values = list(f1 = c(0.5, 1, 1.5))) %>% #need library for predict_gam
+  #ggplot(aes(x2, fit)) +
+  #geom_smooth_ci(f1)
+  
+
+model.sel(Hg.gam,rank = AIC ) 
+gam.check(Hg.gam[[7]], rep=1000)
+summary(Hg.gam[[7]])
+samvif(Hg.gam[[7]])
+
+plot(Hg.gam[[7]],pages=1,residuals=TRUE,all.terms=TRUE,shade=TRUE,shade.col=2)
+plot(Hg.gam[[7]],pages=1,seWithMean=TRUE) ## better coverage intervals
+termplot(Hg.gam[[7]],terms="x0",se=TRUE)
+
+model_p <- predict_gam(Hg.gam[[7]])
+model_p
+
+#when removed dep, model changed a lot. Removed TOC and kept dep - ok. 
+print(Hg.gam[[7]])
+#plot.gam(Hg.gam[[7]]) #plot uten observasjoner
+
+library(tidymv)
+library(voxel) #visualise GAM using ggplot
+library(mgcViz)
+b <- getViz(Hg.gam[[7]]) #convert GAM model to plot
+o <- plot( sm(b, 1) )
+o + l_fitLine(colour = "red") + l_rug(mapping = aes(x=x, y=y), alpha = 0.8) +
+    l_ciLine(mul = 5, colour = "blue", linetype = 2) + 
+    l_points(shape = 19, size = 5, alpha = 0.1) + theme_classic()+
+  ggtitle("Mjøsa")
+Hg.gam[[7]]
+
+uff <- predict(Hg.gam[[7]], type="response", se.fit=TRUE)
+
+plot(Mjoo$THg_mean,fitted(Hg.gam[[7]]))
 ```
-```{r Testing GAM modelling}
-mod_gam1 <- gam(THg_mean ~  s(Hg_dep_mean),data=MjoX)
-summary(mod_gam1)
 
+```{r finding the link function}
+M1 <- gam(THg_mean~ s(Year.c)++Weight_mean.sc+Hg_dep_mean2.sc+Prec_mean.sc+d15N_mean.sc, 
+           select=TRUE, data=Mjoo, method="REML", family=Gamma(link="identity"))
+M2 <- gam(THg_mean~ s(Year.c)++Weight_mean.sc+Hg_dep_mean2.sc+Prec_mean.sc+d15N_mean.sc, 
+             select=TRUE, data=Mjoo, method="REML", family=Gamma(link="inverse"))
+M3 <- gam(THg_mean~ s(Year.c)++Weight_mean.sc+Hg_dep_mean2.sc+Prec_mean.sc+d15N_mean.sc, 
+             select=TRUE, data=Mjoo, method="REML", family=Gamma(link="log"))
+M4 <- gam(THg_mean~ s(Year.c)++Weight_mean.sc+Hg_dep_mean2.sc+Prec_mean.sc+d15N_mean.sc, 
+             select=TRUE, data=Mjoo, method="REML")
+AIC(M1, M2, M3, M4)
+```
+
+- if everything is fine from the gam.check, the k-index would be 1 or greater. if too low we need to increase the ka value in the model. Residual not accounted for. 
+- p-value if significantly different from the random test. should not be different (p  0.05)
+
+##Case Study: Femunden
+- the two observations around year 2000 are higher than the remaining, without data inbetween, and could be influential
+- collinearity: length~weight, d13C_mean~d15N_mean, and weight~d13C
+```{r case study Femunden}
+#looking at collinearity
+ggpairs(FemX,title="Femunden")
+#looking at distribution of variables
+MyVar  <- c("Year", "Length_mean", "Weight_mean","d15N_mean", "d13C_mean","Prec_mean", "Temp_mean", "Hg_dep_mean2")
+MyMultipanel.ggp2(Fem, 
+                  varx = MyVar, 
+                  vary = "THg_mean",
+                  ylab = "Mercury",
+                  addSmoother = TRUE,
+                  addRegressionLine = FALSE,
+                  addHorizontalLine = FALSE)
+#looking at the actual data of the variables
+FemX1 <- subset(Fem, select=c(Year, Length_mean, Weight_mean, THg_mean,d15N_mean, d13C_mean, Prec_mean, Temp_mean, Hg_dep_mean2))
+FemX_long <- gather(FemX1, Variable, measurement, Length_mean:Hg_dep_mean2, factor_key=TRUE)
+#plotting the variables separately
+ggplot(FemX_long, aes(y = measurement, x = Year))+ 
+  geom_point(size = 3)+
+  facet_wrap(Variable~., scales="free")+
+  labs(title ="Mjøsa Variable data",x = "Year", y= "")
+
+# E) Temporal Autocorrelation
+#H0: model does not show lack of fit = "model is fine". p<0.05 rejects the H0. 
+acf(FemX1$THg_mean) 
+Box.test(FemX1$THg_mean, lag = 1, type = c("Box-Pierce", "Ljung-Box"), fitdf = 0)
+
+#Centering and standardizing before mdoel fit
+#centering year to get reasonable intercept
+#Mjoo$Year.c <- (Mjoo$Year - min(Mjoo$Year)+1)
+
+#Scaling covariates for comparability
+#Mjoo$Weight_mean.sc <- scale(Mjoo$Weight_mean)
+#Mjoo$Hg_dep_mean.sc <- scale(Mjoo$Hg_dep_mean)
+#Mjoo$Hg_dep_mean2.sc <- scale(Mjoo$Hg_dep_mean2)
+#Mjoo$TOC.sc <- scale(Mjoo$TOC)
+#Mjoo$Temp_mean.sc <- scale(Mjoo$Temp_mean)
+#Mjoo$d15N_mean.sc <- scale(Mjoo$d15N_mean)
+#Mjoo$Prec_mean.sc <- scale(Mjoo$Prec_mean)
+
+#fra VIF-test utgår C13. Valgte vekt for å ha likt som Mjøsa.
+#Få observasjoner så kun Year som får s(). Kan testes senere?
+#Fra summary: Temp dårligst p-value
+nrow(Fem)
+Hg.g<-list()
+Hg.g[[1]] <- gam(THg_mean~ s(Year, k=4)+Weight_mean+Hg_dep_mean2+Prec_mean+d15N_mean+Temp_mean,  select=TRUE, data=Fem, method="REML", family=Gamma(link="identity"))
+Hg.g[[2]] <- gam(THg_mean~ s(Year, k=4)+Weight_mean+Hg_dep_mean2+Prec_mean+d15N_mean,  select=TRUE, data=Fem, method="REML", family=Gamma(link="identity"))
+Hg.g[[3]] <- gam(THg_mean~ s(Year, k=4)+Weight_mean+Prec_mean+d15N_mean,  select=TRUE, data=Fem, method="REML", family=Gamma(link="identity"))
+Hg.g[[4]] <- gam(THg_mean~ s(Year, k=4)+Weight_mean+d15N_mean,  select=TRUE, data=Fem, method="REML", family=Gamma(link="identity"))
+Hg.g[[5]] <- gam(THg_mean~ Year+Weight_mean+d15N_mean,  select=TRUE, data=Fem, method="REML", family=Gamma(link="identity"))
+Hg.g[[6]] <- gam(THg_mean~ Weight_mean+d15N_mean,  select=TRUE, data=Fem, method="REML", family=Gamma(link="identity"))
+
+
+
+
+model.sel(Hg.g,rank = AIC ) 
+gam.check(Hg.g[[5]], rep=1000)
+summary(Hg.g[[6]])
+samvif(Hg.g[[2]])
+
+visreg(Hg.g[[4]], "Year")
+
+plot(Hg.gam[[7]],pages=1,residuals=TRUE,all.terms=TRUE,shade=TRUE,shade.col=2)
+plot(Hg.gam[[7]],pages=1,seWithMean=TRUE) ## better coverage intervals
+termplot(Hg.gam[[7]],terms="x0",se=TRUE)
 ```
 
 
 
+
+
+##Case Study: Ellasjøen
+- no apparent strict extreme observations
+- weight and length significantly strongly correlated, should not be in the same model. All others ok. 
+- weight seems better than length at explaining (from the model), but both good
+- temporal autocorrelation seems ok
+- including all as s() with low k, seems like temp is not significant, trying without the s(). Not significant without either.
+- edf for s(Year) much higher than for the other. Reason to skip s() for the other? Try and then compare the models. 
+- AIC model 1 slightly better than 2. Model 3 much better than 2 and 1. 
+- Conclusion: 
+
+### Uncertainties in the procedure (compared to the polarbear study)
+- test for multicollinearity 
+- test for interaction between terms
+- checking linearity of residuals of variables (plot not working)
+- what is tested by  ID.NR? some randamization?
+- here, not tested generalized mnixed effect models
